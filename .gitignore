@@ -1,0 +1,137 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.Python
+build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# uv / pip caches
+.uv-cache/
+.pip-cache/
+pip-wheel-metadata/
+
+# =============================================================================
+# Env / secrets
+# =============================================================================
+.env
+.env.local
+.env.*.local
+*.env.local
+secrets/
+*.pem
+*.key
+*.crt
+
+# =============================================================================
+# Storage (generated reports / pdfs / outlines / cached embeddings)
+# =============================================================================
+backend/storage/reports/*
+backend/storage/pdfs/*
+backend/storage/outlines/*
+backend/storage/cache/*
+!backend/storage/reports/.gitkeep
+!backend/storage/pdfs/.gitkeep
+!backend/storage/outlines/.gitkeep
+
+# =============================================================================
+# Frontend / Node
+# =============================================================================
+node_modules/
+.next/
+.turbo/
+.nuxt/
+out/
+dist/
+.pnpm-store/
+.yarn/
+.npm/
+.swc/
+.vercel/
+
+# =============================================================================
+# Databases / data files (large)
+# =============================================================================
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+postgres_data/
+pg_data/
+data/
+dumps/
+backups/
+
+# Embeddings / vector indices / model artifacts
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.h5
+*.bin
+*.safetensors
+*.faiss
+*.index
+*.gguf
+*.onnx
+.chroma/
+.lancedb/
+
+# =============================================================================
+# Docker (volumes that may end up bind-mounted, image tarballs)
+# =============================================================================
+.docker/
+docker-data/
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+docker-compose.override.yml
+docker-compose.local.yml
+
+# =============================================================================
+# IDE / editor / OS
+# =============================================================================
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# Logs / runtime
+# =============================================================================
+*.log
+logs/
+nohup.out
+*.pid
+*.seed
+*.pid.lock
+
+# =============================================================================
+# Misc
+# =============================================================================
+.tmp/
+tmp/
+.cache/
+coverage.xml

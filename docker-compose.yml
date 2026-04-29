@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: insights-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: insights
+      POSTGRES_PASSWORD: insights
+      POSTGRES_DB: insights_collect
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U insights -d insights_collect"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: insights-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://insights:insights@postgres:5432/insights_collect
+      DATABASE_URL_SYNC: postgresql://insights:insights@postgres:5432/insights_collect
+    volumes:
+      - ./backend:/app
+      - backend_storage:/app/storage
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  frontend:
+    image: node:20-alpine
+    container_name: insights-frontend
+    working_dir: /app
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      API_BASE: http://backend:8000
+      NEXT_PUBLIC_API_BASE: http://localhost:8000
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "3000:3000"
+    command: sh -c "corepack enable && pnpm install && pnpm dev"
+
+volumes:
+  pg_data:
+  backend_storage:
