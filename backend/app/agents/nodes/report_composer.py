@@ -10,6 +10,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from app.agents.main_model import pick_main_model
 from app.agents.state import ReportState
 from app.config import get_settings
 from app.db import models
@@ -23,20 +24,72 @@ from app.schemas.llm import ReportCompositionOutput
 log = logging.getLogger(__name__)
 
 
-_PROMPT = """请基于已聚类的专家观点，为这份报告生成 **综合分析包 (FinalAnalysis)**：
+_PROMPT = """你是资深行业分析师。基于下方真实抽取的专家观点 + 聚类，
+为这份报告生成 **综合分析包 (FinalAnalysis)**。要求：
 
-- executive_summary: 一段 200 字内的中文执行摘要
-- executive_summary_bullets: 3-5 条要点
-- consensus / dissent / spotlight / insight: 各列出 3-6 条主要发现
-- section_summaries: 每个主题的小结（已在输入提供，可润色保留）
+- executive_summary: 中文 250-400 字执行摘要。需点名具体专家与他们的核心立场，
+  让读者看完就掌握时间窗内争论焦点 + 关键变量。**严禁使用** "近期" / "众多专家"
+  这种模糊措辞 — 凡涉及人物，必须给出名字和身份；凡涉及观点，必须给出方向。
+- executive_summary_bullets: 5-8 条要点，每条不少于 25 字，必须包含至少一个
+  具体的人/机构/数字/事件。
+- consensus: 3-6 条共识结论。每条 1-2 句，必须列出 2 名以上代表性专家姓名作为佐证。
+- dissent: 3-6 条主要分歧。每条须以「A 认为 X，但 B 反驳 Y」形式呈现，点名两方代表。
+- spotlight: 3-6 条值得重点关注的信号 — 长尾权威 / 政策动向 / 数据节点 /
+  少数派警告。每条 1-2 句，附人名与场合。
+- insight: 3-6 条作者级解读 — 跨观点综合得出的二阶推论或对未来 3-6 月的判断。
+  每条须超出原文复述，给出"因此..."的逻辑。
+
+# 写作纪律
+- 仅基于提供的观点撰写，不要编造未在输入中出现的人名或事件。
+- 引用观点时，请优先用具体引语 (claim_quote) 而非抽象转述。
+- 如果某主题输入信息单薄，宁可减少该主题的产出条目，也不要灌水。
+- 中英姓名混排时，第一次出现给中文 + 括号英文（如「黄仁勋 (Jensen Huang)」）。
 
 主题：{topics}
+
 小节小结：
 {section_summaries}
 
-聚类（按主题）：
+聚类（按主题，用于结构感知）：
 {clusters}
+
+# 候选观点池（请从中挑选论据 — 已按相关性 + 置信度排序）
+{viewpoints_excerpt}
 """
+
+
+def _viewpoints_excerpt_for_prompt(state: ReportState, max_items: int = 60) -> str:
+    """Render up to `max_items` viewpoints as compact Markdown bullets the LLM
+    can directly cite. Sort by confidence desc, then by claim_when desc."""
+    raw = state.get("extracted_viewpoints") or []
+    if not raw:
+        return "(无)"
+
+    def _sort_key(v):
+        conf = getattr(v, "confidence", 0.0) or 0.0
+        when = getattr(v, "claim_when", None)
+        ts = when.timestamp() if when else 0.0
+        return (-conf, -ts)
+
+    items = sorted(raw, key=_sort_key)[:max_items]
+    lines = []
+    for i, v in enumerate(items, 1):
+        when = v.claim_when.date().isoformat() if getattr(v, "claim_when", None) else "时间未知"
+        role = (getattr(v, "expert_role", None) or "").strip()
+        venue = (getattr(v, "claim_medium", None) or getattr(v, "claim_where", None) or "").strip()
+        url = (getattr(v, "claim_source_url", None) or "").strip()
+        quote = (getattr(v, "claim_quote", None) or getattr(v, "claim_what", "") or "").replace("\n", " ").strip()
+        if len(quote) > 280:
+            quote = quote[:280] + "…"
+        lines.append(
+            f"{i}. **{v.expert_name}**"
+            + (f" ({role})" if role else "")
+            + f" · {when}"
+            + (f" · {venue}" if venue else "")
+            + f"\n   > {quote}"
+            + (f"\n   <{url}>" if url else "")
+        )
+    return "\n".join(lines)
 
 
 def _slugify(s: str) -> str:
@@ -141,10 +194,7 @@ async def report_composer_node(state: ReportState) -> dict:
     # 1) get final analysis
     async with SessionLocal() as session:
         providers = await build_providers(session)
-    pref = ["anthropic", "openai", "gemini"]
-    chosen = next((providers[p] for p in pref if p in providers), None)
-    if chosen is None and providers:
-        chosen = next(iter(providers.values()))
+    chosen, main_model_id = pick_main_model(providers, state)
 
     cluster_text = json.dumps(
         {
@@ -162,9 +212,12 @@ async def report_composer_node(state: ReportState) -> dict:
             topics=", ".join(state.get("focus_topics", [])),
             section_summaries=section_summaries_text,
             clusters=cluster_text,
+            viewpoints_excerpt=_viewpoints_excerpt_for_prompt(state),
         )
         try:
-            comp_res = await chosen.structured_extract(prompt, ReportCompositionOutput)
+            comp_res = await chosen.structured_extract(
+                prompt, ReportCompositionOutput, model=main_model_id,
+            )
             comp: ReportCompositionOutput = comp_res.data  # type: ignore[assignment]
             traces = [comp_res.trace]
         except Exception as e:  # noqa: BLE001
@@ -176,7 +229,10 @@ async def report_composer_node(state: ReportState) -> dict:
                     "executive_summary_bullets": [],
                     "consensus": [], "dissent": [], "spotlight": [], "insight": [],
                 },
-                section_summaries=state.get("section_summaries") or {},
+                section_summaries=[
+                    {"topic": t, "summary": s}  # type: ignore[list-item]
+                    for t, s in (state.get("section_summaries") or {}).items()
+                ],
             )
             traces = []
     else:
@@ -187,7 +243,10 @@ async def report_composer_node(state: ReportState) -> dict:
                 "executive_summary_bullets": [],
                 "consensus": [], "dissent": [], "spotlight": [], "insight": [],
             },
-            section_summaries=state.get("section_summaries") or {},
+            section_summaries=[
+                {"topic": t, "summary": s}  # type: ignore[list-item]
+                for t, s in (state.get("section_summaries") or {}).items()
+            ],
         )
         traces = []
 

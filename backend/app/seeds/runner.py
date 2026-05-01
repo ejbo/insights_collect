@@ -37,11 +37,15 @@ def seed_default_events(session: Session) -> None:
 
 
 def seed_default_provider_credentials(session: Session) -> None:
-    """Pre-populate empty credential rows for all 6 providers so /settings UI shows them."""
+    """Pre-populate empty credential rows for all 7 providers so /settings UI shows them.
+
+    Default models target the most capable current SKU per provider as of 2026.
+    User can override per-provider in the UI.
+    """
     providers = [
         ("anthropic", "claude-opus-4-7"),
-        ("openai", "gpt-5"),
-        ("gemini", "gemini-2.5-pro"),
+        ("openai", "gpt-5.5"),
+        ("gemini", "gemini-3.1-pro-preview"),
         ("grok", "grok-4"),
         ("perplexity", "sonar-pro"),
         ("qwen", "qwen3-max"),
@@ -54,12 +58,22 @@ def seed_default_provider_credentials(session: Session) -> None:
             )
         ).scalar_one_or_none()
         if existing is None:
+            # Empty key, but enabled=True so once user enters a key it just works
+            # (load_credentials filters out missing keys regardless).
             session.add(models.ProviderCredential(
                 provider=provider,
                 api_key="",
                 default_model=default_model,
-                enabled=False,
+                enabled=True,
             ))
+        else:
+            # Refresh model id if user hasn't overridden — avoids "outdated" defaults.
+            if not existing.default_model or existing.default_model in {
+                "claude-sonnet-4-6", "gpt-5-mini",
+                "gemini-2.5-flash", "gemini-2.5-pro",
+                "qwen-max", "qwen-plus", "deepseek-chat",
+            }:
+                existing.default_model = default_model
 
 
 def seed_all(session: Session) -> None:

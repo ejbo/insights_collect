@@ -33,6 +33,8 @@ class ReportState(TypedDict, total=False):
     time_range_start: datetime
     time_range_end: datetime
     providers_enabled: list[str]
+    providers_options: dict[str, Any]   # per-provider knobs, e.g. {"anthropic": {"effort": "high", ...}}
+    main_model: dict[str, Any]          # {"provider": "openai", "model": "gpt-5"} — used by every non-search node
     md_template_id: int | None
     outline_template_id: int | None
     cost_cap_usd: float

@@ -14,9 +14,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-CN">
-      <body>
+      <body className="bg-parchment text-ink">
         <Nav />
-        <main className="max-w-6xl mx-auto px-6 py-6">{children}</main>
+        <main className="mx-auto max-w-grid px-lg py-xl">{children}</main>
       </body>
     </html>
   );

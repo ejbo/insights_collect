@@ -108,9 +108,16 @@ class Cluster(BaseModel):
     viewpoint_indices: list[int] = Field(description="对应输入 viewpoints 数组的下标")
 
 
+class TopicClusters(BaseModel):
+    """Flat (topic, clusters) pair — OpenAI strict schemas reject `dict[str, …]`
+    because dynamic-keyed objects can't satisfy `additionalProperties: false`."""
+    topic: str
+    clusters: list[Cluster]
+
+
 class ClusterAnalysisOutput(BaseModel):
-    clusters_per_topic: dict[str, list[Cluster]] = Field(
-        description="key=topic_name, value=该主题下若干 cluster"
+    clusters_per_topic: list[TopicClusters] = Field(
+        description="按主题分组的 cluster 列表（每项 = topic + 该主题下若干 cluster）"
     )
 
 
@@ -126,9 +133,57 @@ class FinalAnalysis(BaseModel):
     insight: list[str] = Field(default_factory=list)
 
 
+class TopicSummary(BaseModel):
+    topic: str
+    summary: str
+
+
 class ReportCompositionOutput(BaseModel):
     title: str
     analysis: FinalAnalysis
-    section_summaries: dict[str, str] = Field(
-        default_factory=dict, description="key=topic_name, value=该主题的小结"
+    section_summaries: list[TopicSummary] = Field(
+        default_factory=list, description="按主题的小结（list of {topic, summary}）"
     )
+
+
+# ---------------------------------------------------------------------------
+# Event curator — classify + merge events across reports
+# ---------------------------------------------------------------------------
+class EventDecision(BaseModel):
+    """One verdict per existing Event row.
+
+    `action` semantics:
+      - keep      : event is a real, named event/forum/podcast/article-with-byline.
+                    Optionally fill in metadata (canonical_name, kind, host, date).
+      - delete    : event name is generic content-type junk (e.g. "研究报告",
+                    "LinkedIn Post", "文章") — drop the row, NULL out viewpoint.event_id.
+      - merge     : event refers to the same real event as `merge_into_id`.
+                    Repoint viewpoints to that id, delete this row.
+    """
+    event_id: int
+    action: Literal["keep", "delete", "merge"]
+    merge_into_id: int | None = Field(
+        default=None,
+        description="只有 action=merge 时填，指向 canonical event 的 id",
+    )
+    canonical_name: str | None = Field(
+        default=None,
+        description="若 action=keep，可顺便规范化名称（如把缩写补全）",
+    )
+    kind: Literal[
+        "forum", "interview", "podcast", "keynote",
+        "paper", "article", "blog", "other",
+    ] | None = None
+    host: str | None = None
+    date_iso: str | None = Field(
+        default=None,
+        description="ISO 8601 日期，若能从名字推断出活动日期则填",
+    )
+    rationale: str = Field(
+        default="",
+        description="一句话说明判断依据，便于人工核对",
+    )
+
+
+class CuratorOutput(BaseModel):
+    decisions: list[EventDecision]

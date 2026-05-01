@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 
+from app.agents.main_model import pick_main_model
 from app.agents.state import ReportState
 from app.db.session import SessionLocal
 from app.providers.registry import build_providers
@@ -50,10 +51,7 @@ async def cluster_analyzer_node(state: ReportState) -> dict:
 
     async with SessionLocal() as session:
         providers = await build_providers(session)
-    pref = ["anthropic", "openai", "gemini"]
-    chosen = next((providers[p] for p in pref if p in providers), None)
-    if chosen is None and providers:
-        chosen = next(iter(providers.values()))
+    chosen, main_model_id = pick_main_model(providers, state)
     if chosen is None:
         return {
             "clusters_by_topic": {},
@@ -66,7 +64,7 @@ async def cluster_analyzer_node(state: ReportState) -> dict:
         viewpoints=_viewpoint_lines(viewpoints),
     )
     try:
-        result = await chosen.structured_extract(prompt, ClusterAnalysisOutput)
+        result = await chosen.structured_extract(prompt, ClusterAnalysisOutput, model=main_model_id)
     except Exception as e:  # noqa: BLE001
         log.exception("cluster analysis failed")
         return {
@@ -76,16 +74,19 @@ async def cluster_analyzer_node(state: ReportState) -> dict:
         }
     out: ClusterAnalysisOutput = result.data  # type: ignore[assignment]
 
-    # Generate per-topic short summary by analyze() call
+    clusters_by_topic = {tc.topic: tc.clusters for tc in out.clusters_per_topic}
+
+    # Generate per-topic short summary via the same main model
     section_summaries: dict[str, str] = {}
-    for topic, clusters in out.clusters_per_topic.items():
+    for topic, clusters in clusters_by_topic.items():
         cluster_lines = [
             f"- ({c.kind}) {c.label}: {c.summary_md[:200]}" for c in clusters
         ]
         try:
             sum_res = await chosen.analyze(
                 f"为主题「{topic}」写一段 100 字内的中文小结，"
-                f"概括下面 cluster 的整体格局：\n" + "\n".join(cluster_lines)
+                f"概括下面 cluster 的整体格局：\n" + "\n".join(cluster_lines),
+                model=main_model_id,
             )
             section_summaries[topic] = sum_res.text.strip()
         except Exception as e:  # noqa: BLE001
@@ -93,13 +94,13 @@ async def cluster_analyzer_node(state: ReportState) -> dict:
             section_summaries[topic] = ""
 
     return {
-        "clusters_by_topic": out.clusters_per_topic,
+        "clusters_by_topic": clusters_by_topic,
         "section_summaries": section_summaries,
         "provider_traces": [result.trace],
         "total_cost_usd": result.trace.cost_usd,
         "total_tokens": result.trace.tokens_input + result.trace.tokens_output,
         "notes": [
-            f"cluster_analyzer: {sum(len(v) for v in out.clusters_per_topic.values())} clusters across "
-            f"{len(out.clusters_per_topic)} topics"
+            f"cluster_analyzer: {sum(len(v) for v in clusters_by_topic.values())} clusters across "
+            f"{len(clusters_by_topic)} topics"
         ],
     }

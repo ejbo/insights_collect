@@ -256,6 +256,7 @@ class Report(SQLModel, table=True):
     outline_template_id: int | None = Field(default=None, foreign_key="report_templates.id")
 
     providers_enabled: list[str] | None = str_array_field(default=None)
+    providers_options: dict | None = json_field(default=None)
     max_reflection_rounds: int = Field(default=3)
     cost_cap_usd: float = Field(default=10.0)
 
@@ -323,6 +324,31 @@ class ProviderCall(SQLModel, table=True):
     latency_ms: int = Field(default=0)
     success: bool = Field(default=True)
     error: str | None = None
+    extra: dict | None = json_field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SearchHit(SQLModel, table=True):
+    """Raw web_search / web_fetch hit returned by a provider.
+
+    One row per result. Lets the UI show the full search trail (query → results),
+    and lets viewpoints reference the underlying source.
+    """
+    __tablename__ = "search_results"
+
+    id: int | None = Field(default=None, primary_key=True)
+    report_id: int = Field(foreign_key="reports.id", index=True)
+    provider_call_id: int | None = Field(default=None, foreign_key="provider_calls.id", index=True)
+    provider: str = Field(index=True)
+    kind: str = Field(default="web_search")  # web_search | web_fetch
+    query: str | None = None
+    url: str | None = Field(default=None, index=True)
+    title: str | None = None
+    snippet: str | None = None
+    source_domain: str | None = Field(default=None, index=True)
+    page_age: str | None = None
+    citations: list[dict] | None = json_field(default=None)
+    extra: dict | None = json_field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -342,4 +368,5 @@ __all__ = [
     "ReportSection",
     "AgentRun",
     "ProviderCall",
+    "SearchHit",
 ]

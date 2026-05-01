@@ -1,8 +1,8 @@
 """LangGraph wiring — main report-generation graph.
 
-Day-1 simplified linear pipeline:
+Linear pipeline:
   Planner → MultiSearch → DedupMerger → ExpertDiscoverer → ViewpointExtractor
-       → ClusterAnalyzer → KnowledgeWriter → ReportComposer
+       → ClusterAnalyzer → KnowledgeWriter → EventCurator → ReportComposer
 
 Critic ↔ GapFiller reflection cycle is staged for v2; the schema (ReportState fields,
 provider_traces accumulator) already supports it without re-architecting.
@@ -14,6 +14,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.nodes.cluster_analyzer import cluster_analyzer_node
 from app.agents.nodes.dedup_merger import dedup_merger_node
+from app.agents.nodes.event_curator import event_curator_node
 from app.agents.nodes.expert_discoverer import expert_discoverer_node
 from app.agents.nodes.knowledge_writer import knowledge_writer_node
 from app.agents.nodes.multi_search import multi_search_node
@@ -33,6 +34,7 @@ def build_report_graph():
     g.add_node("viewpoint_extractor", viewpoint_extractor_node)
     g.add_node("cluster_analyzer", cluster_analyzer_node)
     g.add_node("knowledge_writer", knowledge_writer_node)
+    g.add_node("event_curator", event_curator_node)
     g.add_node("report_composer", report_composer_node)
 
     g.add_edge(START, "planner")
@@ -42,7 +44,8 @@ def build_report_graph():
     g.add_edge("expert_discoverer", "viewpoint_extractor")
     g.add_edge("viewpoint_extractor", "cluster_analyzer")
     g.add_edge("cluster_analyzer", "knowledge_writer")
-    g.add_edge("knowledge_writer", "report_composer")
+    g.add_edge("knowledge_writer", "event_curator")
+    g.add_edge("event_curator", "report_composer")
     g.add_edge("report_composer", END)
 
     return g.compile()

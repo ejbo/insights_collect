@@ -21,14 +21,19 @@ from app.schemas.llm import RawSnippet
 
 
 _PRICE = {
+    "gpt-5.5": (5.0, 20.0),
     "gpt-5": (5.0, 20.0),
     "gpt-5-mini": (0.5, 2.0),
 }
 
 
 def _cost(model: str, i: int, o: int) -> float:
-    r = _PRICE.get(model, (5.0, 20.0))
-    return i / 1_000_000 * r[0] + o / 1_000_000 * r[1]
+    if model in _PRICE:
+        return i / 1_000_000 * _PRICE[model][0] + o / 1_000_000 * _PRICE[model][1]
+    for k, (in_p, out_p) in _PRICE.items():
+        if model.startswith(k):
+            return i / 1_000_000 * in_p + o / 1_000_000 * out_p
+    return i / 1_000_000 * 5.0 + o / 1_000_000 * 20.0
 
 
 def _domain(url: str | None) -> str | None:
@@ -42,8 +47,8 @@ def _domain(url: str | None) -> str | None:
 
 class OpenAIProvider(SearchProvider):
     name = "openai"
-    default_search_model = "gpt-5-mini"
-    default_reasoning_model = "gpt-5"
+    default_search_model = "gpt-5.5"
+    default_reasoning_model = "gpt-5.5"
 
     def __init__(self, api_key: str = "", base_url: str | None = None, default_model: str | None = None):
         super().__init__(api_key, base_url, default_model)
@@ -54,12 +59,26 @@ class OpenAIProvider(SearchProvider):
             raise ProviderUnavailable("OpenAI API key missing")
         return self._client
 
+    async def quick_validate(self) -> ProviderCallTrace:
+        client = self._ensure()
+        t0 = time.perf_counter()
+        page = await client.models.list()
+        latency = int((time.perf_counter() - t0) * 1000)
+        ids = [m.id for m in page.data][:3]
+        return ProviderCallTrace(
+            provider=self.name, model="(models.list)", purpose="health",
+            success=True, latency_ms=latency,
+            extra={"sent": "GET /v1/models", "got": ", ".join(ids) + f" (+{max(0,len(page.data)-3)} more)"},
+        )
+
     async def search(
         self,
         query: str,
         time_window: TimeRange,
         lang: str = "zh",
         max_results: int = 10,
+        options: dict | None = None,
+        **_: object,
     ) -> SearchResult:
         client = self._ensure()
         model = self.default_search_model
@@ -86,30 +105,100 @@ class OpenAIProvider(SearchProvider):
             )
 
         snippets: list[RawSnippet] = []
-        # Extract citations from output_text + annotations
+        search_results: list[dict] = []
+        seen_urls: set[str] = set()
+        final_text_chunks: list[str] = []
+
         for item in getattr(resp, "output", []) or []:
-            for content in getattr(item, "content", []) or []:
-                txt = getattr(content, "text", "")
-                annotations = getattr(content, "annotations", []) or []
-                for ann in annotations:
-                    url = getattr(ann, "url", None)
-                    title = getattr(ann, "title", None)
+            item_type = getattr(item, "type", None)
+
+            # 1) The model invoked the web_search tool — surfaces the actual
+            # query it ran and the source list it pulled.
+            if item_type in ("web_search_call", "web_search_tool_call"):
+                action = getattr(item, "action", None)
+                tool_query = getattr(action, "query", None) or query
+                # Different SDK versions: `sources` on the action, or `results`
+                # on the item itself.
+                src_list = (
+                    getattr(action, "sources", None)
+                    or getattr(item, "results", None)
+                    or []
+                )
+                for s in src_list:
+                    url = getattr(s, "url", None) or (s.get("url") if isinstance(s, dict) else None)
+                    title = (
+                        getattr(s, "title", None)
+                        or (s.get("title") if isinstance(s, dict) else None)
+                    )
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    search_results.append({
+                        "query": tool_query,
+                        "title": title,
+                        "url": url,
+                        "source_domain": _domain(url),
+                        "page_age": None,
+                        "kind": "web_search",
+                    })
                     snippets.append(RawSnippet(
-                        title=title, snippet=txt[:400], url=url,
+                        title=title, snippet=(title or "")[:400], url=url,
                         source_domain=_domain(url), provider=self.name, lang=lang,
                     ))
-                if not annotations and txt:
-                    snippets.append(RawSnippet(snippet=txt, provider=self.name, lang=lang))
+                continue
+
+            # 2) Message items — the assistant's text + url_citation annotations
+            for content in getattr(item, "content", []) or []:
+                txt = getattr(content, "text", "") or ""
+                if txt:
+                    final_text_chunks.append(txt)
+                annotations = getattr(content, "annotations", []) or []
+                for ann in annotations:
+                    ann_type = getattr(ann, "type", None)
+                    if ann_type and ann_type not in ("url_citation", "citation"):
+                        continue
+                    url = getattr(ann, "url", None)
+                    title = getattr(ann, "title", None)
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    search_results.append({
+                        "query": query,
+                        "title": title,
+                        "url": url,
+                        "source_domain": _domain(url),
+                        "page_age": None,
+                        "kind": "web_search",
+                    })
+                    snippets.append(RawSnippet(
+                        title=title, snippet=txt[:400] or (title or ""),
+                        url=url, source_domain=_domain(url),
+                        provider=self.name, lang=lang,
+                    ))
+
+        # If grounding produced no citations but we still got a final text,
+        # keep one snippet so downstream nodes have something to chew on.
+        if not snippets and final_text_chunks:
+            snippets.append(RawSnippet(
+                snippet="\n".join(final_text_chunks)[:1500],
+                provider=self.name, lang=lang,
+            ))
 
         usage = getattr(resp, "usage", None)
         in_t = getattr(usage, "input_tokens", 0) if usage else 0
         out_t = getattr(usage, "output_tokens", 0) if usage else 0
+        final_text = "\n".join(final_text_chunks)
         return SearchResult(
-            snippets=snippets[:max_results],
+            snippets=snippets[:max_results] if max_results else snippets,
             trace=ProviderCallTrace(
                 provider=self.name, model=model, purpose="search", query=query,
                 tokens_input=in_t, tokens_output=out_t, cost_usd=_cost(model, in_t, out_t),
                 latency_ms=int((time.perf_counter() - t0) * 1000),
+                extra={
+                    "search_results": search_results,
+                    "final_text": final_text[:2000] if final_text else None,
+                    "model": model,
+                },
             ),
         )
 

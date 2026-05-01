@@ -13,7 +13,7 @@ import traceback
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.agents.graph import report_graph
 from app.agents.state import ReportState
@@ -32,6 +32,7 @@ NODE_ORDER = [
     "viewpoint_extractor",
     "cluster_analyzer",
     "knowledge_writer",
+    "event_curator",
     "report_composer",
 ]
 
@@ -43,6 +44,7 @@ NODE_LABELS = {
     "viewpoint_extractor": "ViewpointExtractor · 7 元组抽取",
     "cluster_analyzer": "ClusterAnalyzer · 共识/分歧/重点/启示",
     "knowledge_writer": "KnowledgeWriter · 落库",
+    "event_curator": "EventCurator · 事件清洗 / 跨报告合并",
     "report_composer": "ReportComposer · 渲染输出",
 }
 
@@ -51,48 +53,143 @@ NODE_LABELS = {
 # Stats helper
 # ---------------------------------------------------------------------------
 def _compute_node_stats(node_name: str, partial: dict[str, Any]) -> dict[str, Any]:
-    """Per-node summary that the UI shows ('collected N, kept M, etc.')."""
+    """Per-node summary the UI renders. Includes a small `details` payload
+    so each stage row can show *what* was produced, not just counts.
+
+    Bounded: lists capped to ~30 items, strings to ~200 chars. The whole
+    blob is JSON-serialised into agent_runs.state_out.
+    """
     p = partial or {}
+
     if node_name == "planner":
         plan = p.get("plan")
+        sqs = p.get("sub_queries") or []
         return {
-            "sub_queries": len(p.get("sub_queries") or []),
-            "topic_breakdown": len(getattr(plan, "topic_breakdown", []) or []) if plan else 0,
-            "anchor_events_suggested": len(getattr(plan, "suggested_anchor_events", []) or []) if plan else 0,
+            "sub_queries_count": len(sqs),
+            "topic_breakdown_count": len(getattr(plan, "topic_breakdown", []) or []) if plan else 0,
+            "anchor_events_count": len(getattr(plan, "suggested_anchor_events", []) or []) if plan else 0,
+            "sub_queries": [
+                {"text": (s.text or "")[:160], "lang": s.lang, "angle": s.angle}
+                for s in sqs[:30]
+            ],
+            "anchor_events": list(getattr(plan, "suggested_anchor_events", []) or [])[:20] if plan else [],
         }
+
     if node_name == "multi_search":
         snippets = p.get("raw_snippets") or []
+        traces = p.get("provider_traces") or []
         providers = sorted({s.provider for s in snippets if hasattr(s, "provider")})
-        return {"snippets_collected": len(snippets), "providers_used": providers}
-    if node_name == "dedup_merger":
-        return {"clusters_after_dedup": len(p.get("snippets_clusters") or [])}
-    if node_name == "expert_discoverer":
+        per_provider: dict[str, dict[str, Any]] = {}
+        for t in traces:
+            row = per_provider.setdefault(t.provider, {
+                "calls": 0, "errors": 0, "snippets": 0,
+                "tokens": 0, "cost_usd": 0.0, "latency_total_ms": 0,
+            })
+            row["calls"] += 1
+            if not t.success:
+                row["errors"] += 1
+            row["tokens"] += (t.tokens_input or 0) + (t.tokens_output or 0)
+            row["cost_usd"] = round(row["cost_usd"] + (t.cost_usd or 0.0), 6)
+            row["latency_total_ms"] += t.latency_ms or 0
+        for s in snippets:
+            row = per_provider.get(getattr(s, "provider", None))
+            if row is not None:
+                row["snippets"] += 1
         return {
-            "expert_candidates": len(p.get("expert_candidates") or []),
-            "events_discovered": len(p.get("discovered_event_names") or []),
+            "snippets_collected": len(snippets),
+            "providers_used": providers,
+            "calls_total": len(traces),
+            "calls_failed": sum(1 for t in traces if not t.success),
+            "per_provider": per_provider,
         }
-    if node_name == "viewpoint_extractor":
-        return {"viewpoints_extracted": len(p.get("extracted_viewpoints") or [])}
-    if node_name == "cluster_analyzer":
-        clusters_by_topic = p.get("clusters_by_topic") or {}
-        total = sum(len(v) for v in clusters_by_topic.values())
+
+    if node_name == "dedup_merger":
+        clusters = p.get("snippets_clusters") or []
+        domain_count: dict[str, int] = {}
+        for c in clusters:
+            d = c.get("domain")
+            if d:
+                domain_count[d] = domain_count.get(d, 0) + 1
+        top_domains = sorted(domain_count.items(), key=lambda x: -x[1])[:10]
         return {
-            "topics_covered": len(clusters_by_topic),
+            "clusters_after_dedup": len(clusters),
+            "top_domains": [{"domain": d, "count": n} for d, n in top_domains],
+        }
+
+    if node_name == "expert_discoverer":
+        cands = p.get("expert_candidates") or []
+        events = p.get("discovered_event_names") or []
+        return {
+            "expert_candidates_count": len(cands),
+            "events_discovered_count": len(events),
+            "candidates": [
+                {
+                    "name": getattr(c, "name", None),
+                    "role": getattr(c, "role", None),
+                    "affiliations": list(getattr(c, "affiliations", []) or [])[:3],
+                    "relevance": getattr(c, "relevance_score", None),
+                    "rationale": (getattr(c, "rationale", "") or "")[:200],
+                }
+                for c in cands[:30]
+            ],
+            "events": list(events)[:20],
+        }
+
+    if node_name == "viewpoint_extractor":
+        vps = p.get("extracted_viewpoints") or []
+        return {
+            "viewpoints_extracted": len(vps),
+            "viewpoints": [
+                {
+                    "expert_name": getattr(v, "expert_name", None),
+                    "expert_role": getattr(v, "expert_role", None),
+                    "claim_when": v.claim_when.date().isoformat() if getattr(v, "claim_when", None) else None,
+                    "claim_where": getattr(v, "claim_where", None),
+                    "claim_what": (getattr(v, "claim_what", "") or "")[:200],
+                    "claim_medium": getattr(v, "claim_medium", None),
+                    "claim_source_url": getattr(v, "claim_source_url", None),
+                    "confidence": getattr(v, "confidence", None),
+                }
+                for v in vps[:40]
+            ],
+        }
+
+    if node_name == "cluster_analyzer":
+        cbt = p.get("clusters_by_topic") or {}
+        total = sum(len(v) for v in cbt.values())
+        return {
+            "topics_covered": len(cbt),
             "clusters_total": total,
             "section_summaries_written": len(p.get("section_summaries") or {}),
+            "clusters_by_topic": {
+                topic: [
+                    {"label": getattr(c, "label", ""), "kind": getattr(c, "kind", "")}
+                    for c in clusters[:8]
+                ]
+                for topic, clusters in cbt.items()
+            },
+            "section_summaries": {
+                t: (s or "")[:240]
+                for t, s in (p.get("section_summaries") or {}).items()
+            },
         }
+
     if node_name == "knowledge_writer":
         return {
             "experts_persisted": len(p.get("persisted_expert_ids") or []),
             "events_persisted": len(p.get("persisted_event_ids") or []),
             "viewpoints_persisted": len(p.get("persisted_viewpoint_ids") or []),
+            "viewpoint_ids": list(p.get("persisted_viewpoint_ids") or []),
+            "expert_ids": list(p.get("persisted_expert_ids") or []),
         }
+
     if node_name == "report_composer":
         return {
             "md_generated": bool(p.get("md_path")),
             "outline_generated": bool(p.get("outline_json_path")),
             "pdf_generated": bool(p.get("pdf_path")),
         }
+
     return {}
 
 
@@ -100,6 +197,13 @@ def _provider_traces_summary(partial: dict[str, Any]) -> tuple[int, float]:
     traces = partial.get("provider_traces") or []
     tokens = sum((t.tokens_input or 0) + (t.tokens_output or 0) for t in traces)
     cost = sum(t.cost_usd or 0.0 for t in traces)
+    # Multi-pass providers (grok dual x_search) carry earlier-pass totals on
+    # `extra` because those were persisted as separate ProviderCall rows. Roll
+    # them in so the AgentRun row matches the report total.
+    for t in traces:
+        ex = getattr(t, "extra", None) or {}
+        cost += ex.get("pass1_cost_usd") or 0.0
+        tokens += ex.get("pass1_tokens_total") or 0
     return tokens, cost
 
 
@@ -115,6 +219,11 @@ async def _load_initial_state(report_id: int) -> ReportState | None:
             return None
         end = row.time_range_end or datetime.utcnow()
         start = row.time_range_start or end
+        all_options = dict(row.providers_options or {})
+        # main_model stashed under "__main__" to avoid a new column
+        main_model = all_options.pop("__main__", None) or {
+            "provider": "openai", "model": "gpt-5.5",
+        }
         return ReportState(
             report_id=row.id,
             title=row.title,
@@ -122,6 +231,8 @@ async def _load_initial_state(report_id: int) -> ReportState | None:
             time_range_start=start,
             time_range_end=end,
             providers_enabled=list(row.providers_enabled or []),
+            providers_options=all_options,
+            main_model=main_model,
             md_template_id=row.md_template_id,
             outline_template_id=row.outline_template_id,
             cost_cap_usd=row.cost_cap_usd,
@@ -143,6 +254,9 @@ async def _write_agent_run(
     started_at: datetime,
     finished_at: datetime,
 ) -> None:
+    """Persist this node's AgentRun row, then refresh the parent report's
+    running cost/token totals so the UI header sees them update live (instead
+    of staying $0 until the very end)."""
     stats = _compute_node_stats(node_name, partial)
     tokens, cost = _provider_traces_summary(partial)
     errors = partial.get("errors") or []
@@ -159,6 +273,26 @@ async def _write_agent_run(
             finished_at=finished_at,
             error=err_str,
         ))
+        await session.flush()
+
+        # Sum across all agent_runs for this report (including the one we just
+        # added) and push the running totals onto the report row.
+        running_cost = (await session.execute(
+            select(func.coalesce(func.sum(models.AgentRun.cost_usd), 0.0))
+            .where(models.AgentRun.report_id == report_id)
+        )).scalar() or 0.0
+        running_tokens = (await session.execute(
+            select(func.coalesce(func.sum(models.AgentRun.tokens), 0))
+            .where(models.AgentRun.report_id == report_id)
+        )).scalar() or 0
+
+        report_row = (await session.execute(
+            select(models.Report).where(models.Report.id == report_id)
+        )).scalar_one_or_none()
+        if report_row is not None:
+            report_row.total_cost_usd = float(running_cost)
+            report_row.total_tokens = int(running_tokens)
+
         await session.commit()
 
 

@@ -1,0 +1,45 @@
+# Generated from backend/pyproject.toml — keep in sync.
+# Python >= 3.12
+
+# ---- Web framework ----
+fastapi>=0.115
+uvicorn[standard]>=0.32
+sse-starlette>=2.1
+python-multipart>=0.0.17
+
+# ---- Settings / models ----
+pydantic>=2.9
+pydantic-settings>=2.6
+
+# ---- DB ----
+sqlmodel>=0.0.22
+asyncpg>=0.30
+psycopg2-binary>=2.9
+alembic>=1.14
+pgvector>=0.3.6
+
+# ---- Agent orchestration ----
+langgraph>=0.2.50
+langgraph-checkpoint-postgres>=2.0
+
+# ---- LLM / search providers ----
+anthropic>=0.40
+google-genai>=0.3
+openai>=1.55
+xai-sdk>=0.0.5
+dashscope>=1.20
+
+# ---- HTTP / utils ----
+httpx>=0.28
+tenacity>=9.0
+structlog>=24.4
+apscheduler>=3.10
+
+# ---- Reports ----
+jinja2>=3.1
+weasyprint>=63
+
+# ---- Dev (optional) ----
+# ruff>=0.7
+# pytest>=8.3
+# pytest-asyncio>=0.24

@@ -2,25 +2,231 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Apple design system — see Skills/DESIGN-apple.md and CLAUDE.md.
+ * This file owns base typography, the canvas color, and the small set of
+ * sanctioned utility classes. Do not add new ad-hoc styles to pages —
+ * extend this file instead.
+ */
+
 :root {
   color-scheme: light;
 }
 
 html, body { height: 100%; }
+
 body {
-  font-family: 'PingFang SC', 'Helvetica Neue', system-ui, -apple-system, sans-serif;
-  background: #f9fafb;
-  color: #111827;
+  font-family: 'SF Pro Text', system-ui, -apple-system, BlinkMacSystemFont,
+    'PingFang SC', 'Helvetica Neue', sans-serif;
+  font-size: 17px;          /* Apple body — 17, never 16. */
+  line-height: 1.47;
+  letter-spacing: -0.374px;
+  background: #f5f5f7;      /* parchment — the default page canvas */
+  color: #1d1d1f;           /* near-black ink */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-.prose-md h1 { @apply text-2xl font-semibold mb-4 mt-6 border-b pb-2 border-gray-200; }
-.prose-md h2 { @apply text-xl font-semibold mb-3 mt-5; }
-.prose-md h3 { @apply text-lg font-semibold mb-2 mt-4; }
-.prose-md p  { @apply mb-3 leading-relaxed; }
-.prose-md ul { @apply list-disc ml-6 mb-3 space-y-1; }
-.prose-md ol { @apply list-decimal ml-6 mb-3 space-y-1; }
-.prose-md blockquote { @apply border-l-4 border-blue-300 pl-3 my-3 text-gray-700 bg-blue-50 py-2; }
-.prose-md a { @apply text-blue-600 hover:underline; }
-.prose-md code { @apply bg-gray-100 rounded px-1 text-sm; }
-.prose-md table { @apply border-collapse my-3; }
-.prose-md th, .prose-md td { @apply border border-gray-200 px-2 py-1; }
+/* Headlines pick the display face automatically. */
+h1, h2, h3, h4 {
+  font-family: 'SF Pro Display', system-ui, -apple-system, BlinkMacSystemFont,
+    'PingFang SC', sans-serif;
+  letter-spacing: -0.28px;
+  font-weight: 600;
+}
+
+@layer components {
+  /* ---------- Buttons ---------- */
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-1
+           bg-primary text-canvas
+           text-body font-text font-normal
+           rounded-pill px-[22px] py-[11px]
+           transition-transform duration-100
+           active:scale-95
+           focus-visible:outline-none
+           focus-visible:ring-2 focus-visible:ring-primary-focus
+           disabled:bg-ink-muted-48 disabled:text-canvas/80
+           disabled:cursor-not-allowed disabled:active:scale-100;
+  }
+
+  .btn-secondary-pill {
+    @apply inline-flex items-center justify-center gap-1
+           bg-transparent text-primary
+           text-body font-text
+           rounded-pill px-[22px] py-[11px]
+           border border-primary
+           transition-transform duration-100
+           active:scale-95
+           focus-visible:outline-none
+           focus-visible:ring-2 focus-visible:ring-primary-focus
+           disabled:text-ink-muted-48 disabled:border-hairline
+           disabled:cursor-not-allowed disabled:active:scale-100;
+  }
+
+  .btn-dark-utility {
+    @apply inline-flex items-center justify-center
+           bg-ink text-canvas
+           text-button-utility font-text
+           rounded-sm px-[15px] py-[8px]
+           transition-transform duration-100
+           active:scale-95
+           focus-visible:outline-none
+           focus-visible:ring-2 focus-visible:ring-primary-focus
+           disabled:bg-ink-muted-48 disabled:cursor-not-allowed
+           disabled:active:scale-100;
+  }
+
+  .btn-pearl {
+    @apply inline-flex items-center justify-center
+           bg-pearl text-ink-muted-80
+           text-caption font-text
+           rounded-md px-[14px] py-[8px]
+           border border-divider-soft
+           transition-transform duration-100
+           active:scale-95;
+  }
+
+  /* ---------- Tiles & cards ---------- */
+
+  .tile-light {
+    @apply bg-canvas text-ink py-section px-lg;
+  }
+
+  .tile-parchment {
+    @apply bg-parchment text-ink py-section px-lg;
+  }
+
+  .tile-dark {
+    @apply bg-tile text-body-on-dark py-section px-lg;
+  }
+
+  .card-utility {
+    @apply bg-canvas text-ink rounded-tile-lg p-lg
+           border border-hairline;
+  }
+
+  /* A flatter card variant for in-page sections (no padding overrides). */
+  .surface-card {
+    @apply bg-canvas rounded-tile-lg border border-hairline;
+  }
+
+  /* ---------- Chips ---------- */
+
+  .chip {
+    @apply inline-flex items-center gap-1.5
+           bg-canvas text-ink
+           text-caption font-text
+           rounded-pill px-4 py-2
+           border border-hairline
+           transition-transform duration-100
+           active:scale-95;
+  }
+
+  .chip-selected {
+    @apply bg-canvas text-ink
+           border-2 border-primary-focus;
+  }
+
+  .chip-disabled {
+    @apply bg-canvas text-ink-muted-48 border border-hairline opacity-60
+           cursor-not-allowed active:scale-100;
+  }
+
+  /* Status pills — see CLAUDE.md status table. */
+  .status-pill {
+    @apply inline-flex items-center
+           text-caption-strong font-text
+           rounded-pill px-2.5 py-0.5;
+  }
+  .status-pending     { @apply status-pill bg-parchment      text-ink-muted-80; }
+  .status-running     { @apply status-pill bg-primary/10     text-primary; }
+  .status-succeeded   { @apply status-pill bg-status-success/10 text-status-success; }
+  .status-failed      { @apply status-pill bg-status-danger/10  text-status-danger; }
+  .status-cancelled   { @apply status-pill bg-parchment      text-ink-muted-48; }
+
+  /* ---------- Inputs ---------- */
+
+  .input-pill {
+    @apply h-11 w-full bg-canvas text-ink
+           text-body font-text
+           rounded-pill px-5
+           border border-hairline
+           placeholder:text-ink-muted-48
+           focus:outline-none focus:border-primary-focus
+           focus:ring-2 focus:ring-primary-focus/20;
+  }
+
+  .input-flat {
+    @apply h-11 w-full bg-canvas text-ink
+           text-body font-text
+           rounded-sm px-3
+           border border-hairline
+           placeholder:text-ink-muted-48
+           focus:outline-none focus:border-primary-focus
+           focus:ring-2 focus:ring-primary-focus/20;
+  }
+
+  .textarea-flat {
+    @apply w-full bg-canvas text-ink
+           text-body font-text
+           rounded-sm px-3 py-2
+           border border-hairline
+           placeholder:text-ink-muted-48
+           focus:outline-none focus:border-primary-focus
+           focus:ring-2 focus:ring-primary-focus/20;
+  }
+
+  /* ---------- Motion ---------- */
+
+  /* Subtle entrance for cards / list items. Use sparingly — once per page. */
+  .reveal {
+    animation: reveal 320ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+
+  /* Surface that responds to hover with a soft lift + shadow. */
+  .surface-interactive {
+    @apply transition-all duration-200 ease-out;
+  }
+  .surface-interactive:hover {
+    @apply -translate-y-0.5 shadow-md;
+  }
+
+  /* ---------- Markdown ---------- */
+
+  .prose-md {
+    @apply font-text text-body text-ink;
+  }
+  .prose-md h1 { @apply font-display text-display-lg mt-xl mb-md; }
+  .prose-md h2 { @apply font-display text-display-md mt-lg mb-sm; }
+  .prose-md h3 { @apply font-display text-tagline mt-lg mb-xs; }
+  .prose-md p  { @apply mb-md; }
+  .prose-md ul { @apply list-disc ml-6 mb-md space-y-1; }
+  .prose-md ol { @apply list-decimal ml-6 mb-md space-y-1; }
+  .prose-md a  { @apply text-primary; }
+  .prose-md code {
+    @apply font-mono text-caption bg-parchment rounded-sm px-1.5 py-0.5;
+  }
+  .prose-md pre {
+    @apply font-mono text-caption bg-parchment rounded-tile-lg p-lg overflow-auto;
+  }
+  .prose-md blockquote {
+    @apply border-l-2 border-primary pl-4 my-md text-ink-muted-80;
+  }
+  .prose-md table { @apply w-full text-caption my-md; }
+  .prose-md th, .prose-md td {
+    @apply border-b border-hairline px-3 py-2 text-left;
+  }
+  .prose-md th { @apply text-caption-strong; }
+}
+
+@keyframes reveal {
+  0%   { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}

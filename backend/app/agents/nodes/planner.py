@@ -2,6 +2,7 @@
 
 import logging
 
+from app.agents.main_model import pick_main_model
 from app.agents.state import ReportState
 from app.db.session import SessionLocal
 from app.providers.registry import build_providers
@@ -35,10 +36,7 @@ async def planner_node(state: ReportState) -> dict:
     async with SessionLocal() as session:
         providers = await build_providers(session)
 
-    pref = ["anthropic", "openai", "gemini"]
-    chosen = next((providers[p] for p in pref if p in providers), None)
-    if chosen is None and providers:
-        chosen = next(iter(providers.values()))
+    chosen, main_model_id = pick_main_model(providers, state)
     if chosen is None:
         # No provider available — produce a trivial fallback plan.
         sub_queries = [
@@ -65,7 +63,7 @@ async def planner_node(state: ReportState) -> dict:
         end=state["time_range_end"].date(),
     )
     try:
-        result = await chosen.structured_extract(prompt, PlannerOutput)
+        result = await chosen.structured_extract(prompt, PlannerOutput, model=main_model_id)
     except Exception as e:  # noqa: BLE001
         log.exception("planner extract failed")
         sub_queries = [SubQuery(text=t, lang="zh", angle="专家观点") for t in topics]

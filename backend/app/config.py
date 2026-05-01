@@ -43,8 +43,7 @@ class Settings(BaseSettings):
     max_provider_calls_per_run: int = 300
     cost_cap_usd_per_run: float = 10.0
     max_reflection_rounds: int = 3
-    provider_call_timeout_s: int = 90
-    smoke_call_timeout_s: int = 60
+    smoke_call_timeout_s: int = 90
 
     frontend_url: str = "http://localhost:3000"
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from app.agents.main_model import pick_main_model
 from app.agents.state import ReportState
 from app.db.session import SessionLocal
 from app.providers.registry import build_providers
@@ -64,10 +65,7 @@ async def viewpoint_extractor_node(state: ReportState) -> dict:
 
     async with SessionLocal() as session:
         providers = await build_providers(session)
-    pref = ["anthropic", "openai", "gemini", "deepseek", "qwen"]
-    chosen = next((providers[p] for p in pref if p in providers), None)
-    if chosen is None and providers:
-        chosen = next(iter(providers.values()))
+    chosen, main_model_id = pick_main_model(providers, state)
     if chosen is None:
         return {
             "extracted_viewpoints": [],
@@ -80,7 +78,7 @@ async def viewpoint_extractor_node(state: ReportState) -> dict:
         snippets=snippets_block,
     )
     try:
-        result = await chosen.structured_extract(prompt, ViewpointExtractionOutput)
+        result = await chosen.structured_extract(prompt, ViewpointExtractionOutput, model=main_model_id)
     except Exception as e:  # noqa: BLE001
         log.exception("viewpoint extraction failed")
         return {

@@ -97,6 +97,8 @@ class SearchProvider(ABC):
         time_window: TimeRange,
         lang: str = "zh",
         max_results: int = 10,
+        options: dict | None = None,
+        **kwargs: Any,
     ) -> SearchResult:
         ...
 
@@ -120,15 +122,31 @@ class SearchProvider(ABC):
         ...
 
     async def health_check(self) -> ProviderCallTrace:
-        """Lightweight call to verify API key works. Default: 1-token analyze."""
+        """Cheap key-validity check (no LLM tokens). Default: minimal analyze.
+        Providers with a list-models endpoint should override `quick_validate`.
+        """
         try:
-            res = await self.analyze("ping", context=None)
-            return res.trace
+            return await self.quick_validate()
         except Exception as e:  # noqa: BLE001
             return ProviderCallTrace(
                 provider=self.name, model=self.default_search_model, purpose="health",
-                success=False, error=str(e),
+                success=False, error=str(e)[:300],
             )
+
+    async def quick_validate(self) -> ProviderCallTrace:
+        """Default: tiny analyze call. Subclasses override with /v1/models GET
+        for sub-second key validation.
+        """
+        import time as _t
+        t0 = _t.perf_counter()
+        res = await self.analyze("hi")
+        return ProviderCallTrace(
+            provider=self.name, model=res.trace.model, purpose="health",
+            tokens_input=res.trace.tokens_input, tokens_output=res.trace.tokens_output,
+            cost_usd=res.trace.cost_usd, latency_ms=res.trace.latency_ms,
+            success=True,
+            extra={"sent": "analyze('hi')", "got": (res.text or "")[:80]},
+        )
 
 
 class ProviderUnavailable(Exception):

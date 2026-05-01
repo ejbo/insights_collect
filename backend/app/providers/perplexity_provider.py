@@ -58,12 +58,40 @@ class PerplexityProvider(SearchProvider):
             r.raise_for_status()
             return r.json()
 
+    async def quick_validate(self) -> ProviderCallTrace:
+        # Perplexity Sonar has no /models endpoint; use a 1-token completion.
+        if not self.api_key:
+            raise ProviderUnavailable("Perplexity API key missing")
+        t0 = time.perf_counter()
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"{self._base}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}",
+                         "Content-Type": "application/json"},
+                json={"model": "sonar", "messages": [{"role": "user", "content": "hi"}],
+                      "max_tokens": 1},
+            )
+        latency = int((time.perf_counter() - t0) * 1000)
+        if r.status_code != 200:
+            return ProviderCallTrace(
+                provider=self.name, model="-", purpose="health",
+                success=False, latency_ms=latency,
+                error=f"HTTP {r.status_code}: {r.text[:200]}",
+            )
+        return ProviderCallTrace(
+            provider=self.name, model="sonar", purpose="health",
+            success=True, latency_ms=latency,
+            extra={"sent": "1-token chat completion", "got": "ok"},
+        )
+
     async def search(
         self,
         query: str,
         time_window: TimeRange,
         lang: str = "zh",
         max_results: int = 10,
+        options: dict | None = None,
+        **_: object,
     ) -> SearchResult:
         if not self.api_key:
             raise ProviderUnavailable("Perplexity API key missing")
