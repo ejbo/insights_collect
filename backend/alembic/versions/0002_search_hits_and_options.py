@@ -3,10 +3,13 @@
 Revision ID: 0002_search_hits
 Revises: 0001_initial
 Create Date: 2026-04-29
+
+NOTE: the upgrade is idempotent. 0001 calls SQLModel.metadata.create_all(),
+which already builds every table/column from the *current* model — so on a
+fresh DB the columns this migration adds may already exist. Using PostgreSQL's
+`IF NOT EXISTS` keeps the migration safe to re-run on first boot.
 """
-import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import JSONB
 
 revision = "0002_search_hits"
 down_revision = "0001_initial"
@@ -16,42 +19,57 @@ depends_on = None
 
 def upgrade() -> None:
     # 1. providers_options on reports (jsonb, holds per-provider knobs)
-    op.add_column(
-        "reports",
-        sa.Column("providers_options", JSONB, nullable=True),
+    op.execute(
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS providers_options JSONB"
     )
 
     # 2. extra on provider_calls (jsonb — citations/search results metadata, etc.)
-    op.add_column(
-        "provider_calls",
-        sa.Column("extra", JSONB, nullable=True),
+    op.execute(
+        "ALTER TABLE provider_calls ADD COLUMN IF NOT EXISTS extra JSONB"
     )
 
     # 3. search_results table — raw web_search / web_fetch hits
-    op.create_table(
-        "search_results",
-        sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-        sa.Column("report_id", sa.Integer,
-                  sa.ForeignKey("reports.id", ondelete="CASCADE"),
-                  nullable=False, index=True),
-        sa.Column("provider_call_id", sa.Integer,
-                  sa.ForeignKey("provider_calls.id", ondelete="SET NULL"),
-                  nullable=True, index=True),
-        sa.Column("provider", sa.String(length=64), nullable=False, index=True),
-        sa.Column("kind", sa.String(length=32), nullable=False, server_default="web_search"),
-        sa.Column("query", sa.Text, nullable=True),
-        sa.Column("url", sa.String(length=2048), nullable=True, index=True),
-        sa.Column("title", sa.String(length=1024), nullable=True),
-        sa.Column("snippet", sa.Text, nullable=True),
-        sa.Column("source_domain", sa.String(length=255), nullable=True, index=True),
-        sa.Column("page_age", sa.String(length=64), nullable=True),
-        sa.Column("citations", JSONB, nullable=True),
-        sa.Column("extra", JSONB, nullable=True),
-        sa.Column("created_at", sa.DateTime, server_default=sa.func.now()),
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS search_results (
+            id               SERIAL PRIMARY KEY,
+            report_id        INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+            provider_call_id INTEGER          REFERENCES provider_calls(id) ON DELETE SET NULL,
+            provider         VARCHAR(64)  NOT NULL,
+            kind             VARCHAR(32)  NOT NULL DEFAULT 'web_search',
+            query            TEXT,
+            url              VARCHAR(2048),
+            title            VARCHAR(1024),
+            snippet          TEXT,
+            source_domain    VARCHAR(255),
+            page_age         VARCHAR(64),
+            citations        JSONB,
+            extra            JSONB,
+            created_at       TIMESTAMP DEFAULT now()
+        )
+    """)
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_search_results_report_id "
+        "ON search_results (report_id)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_search_results_provider_call_id "
+        "ON search_results (provider_call_id)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_search_results_provider "
+        "ON search_results (provider)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_search_results_url "
+        "ON search_results (url)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_search_results_source_domain "
+        "ON search_results (source_domain)"
     )
 
 
 def downgrade() -> None:
-    op.drop_table("search_results")
-    op.drop_column("provider_calls", "extra")
-    op.drop_column("reports", "providers_options")
+    op.execute("DROP TABLE IF EXISTS search_results")
+    op.execute("ALTER TABLE provider_calls DROP COLUMN IF EXISTS extra")
+    op.execute("ALTER TABLE reports DROP COLUMN IF EXISTS providers_options")
