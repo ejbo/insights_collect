@@ -33,13 +33,13 @@ export function estimateGeminiCostPerTopic(o: GeminiOptions): { low: number; hig
 
 export const DEFAULT_GEMINI_OPTIONS: GeminiOptions = {
   model: null,
-  thinking_budget: -1,
+  thinking_budget: 4096,
   temperature: null,
   max_output_tokens: 8192,
   enable_search: true,
   user_location_country: null,
-  max_search_queries: 3,
-  max_grounding_chunks: 8,
+  max_search_queries: 5,
+  max_grounding_chunks: 12,
 };
 
 /* ---------------- Component ---------------- */
@@ -119,7 +119,7 @@ export function GeminiOptionsPanel({
               max={10}
               step={1}
               value={value.max_search_queries}
-              onChange={(n) => patch("max_search_queries", n ?? 3)}
+              onChange={(n) => { if (n !== null) patch("max_search_queries", n); }}
             />
             <p className="mt-xxs text-caption text-ink-muted-48">
               软上限（写在 prompt 里让模型自我约束）。默认 3，越小越省钱。
@@ -135,7 +135,7 @@ export function GeminiOptionsPanel({
               max={30}
               step={1}
               value={value.max_grounding_chunks}
-              onChange={(n) => patch("max_grounding_chunks", n ?? 8)}
+              onChange={(n) => { if (n !== null) patch("max_grounding_chunks", n); }}
             />
             <p className="mt-xxs text-caption text-ink-muted-48">
               落库前对 grounding_chunks 截断，避免长尾低相关链接。
@@ -214,7 +214,7 @@ export function GeminiOptionsPanel({
             max={32768}
             step={512}
             value={value.max_output_tokens}
-            onChange={(n) => patch("max_output_tokens", n ?? 8192)}
+            onChange={(n) => { if (n !== null) patch("max_output_tokens", n); }}
           />
         </div>
       </div>

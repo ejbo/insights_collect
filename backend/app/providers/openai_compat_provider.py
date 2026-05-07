@@ -214,7 +214,7 @@ class QwenOptions:
     enable_thinking: bool = True
     # 'agent' = web search only; 'agent_max' = adds web scraping (more depth,
     # higher cost, requires thinking mode for qwen3-max snapshots).
-    search_strategy: str = "agent"
+    search_strategy: str = "agent_max"
     max_output_tokens: int = 8192
 
     @classmethod
@@ -281,26 +281,47 @@ class QwenProvider(_OpenAICompatProvider):
         # We hit /chat/completions because /responses is only enabled for a
         # narrow set of snapshots (qwen3.5, qwen3-max snapshots) and silently
         # returns empty on others — that's the "✓ but 0 hits / 0 tokens"
-        # smoke-test signature the user reported.
+        # smoke-test signature observed earlier.
+        #
+        # IMPORTANT: enable_search in non-streaming mode is rejected by some
+        # qwen snapshots (e.g. qwen3.6-plus on the US-Virginia endpoint), with
+        # `<400> InternalError.Algo.InvalidParameter: Non-streaming mode does
+        # not support Web Search in thinking mode` — even when our request
+        # explicitly sets `enable_thinking: false`, because those models are
+        # thinking-mode-only at the server level. Safest path: stream whenever
+        # web search is on. The streaming SSE collector reassembles a normal
+        # response shape so the rest of the pipeline doesn't notice.
+        needs_stream = opts.enable_search
         payload: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": opts.max_output_tokens,
-            "enable_thinking": opts.enable_thinking,
         }
+        # Only forward `enable_thinking` when True. Sending `false` to a
+        # thinking-only snapshot (e.g. qwen3.6-plus) returns the same 400.
+        # When omitted, the server uses whatever the model supports.
+        if opts.enable_thinking:
+            payload["enable_thinking"] = True
         if opts.enable_search:
             payload["enable_search"] = True
-            # search_strategy is only honored in agent mode; harmless otherwise.
             payload["search_options"] = {
                 "search_strategy": opts.search_strategy,
                 "enable_source": True,
                 "enable_citation": True,
                 "citation_format": "[ref_<number>]",
             }
+        if needs_stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
 
         t0 = time.perf_counter()
         try:
-            data = await self._post("/chat/completions", payload)
+            if needs_stream:
+                data = await _qwen_stream_collect(
+                    self._base, self.api_key, payload,
+                )
+            else:
+                data = await self._post("/chat/completions", payload)
         except httpx.HTTPStatusError as e:  # noqa: BLE001
             return SearchResult(
                 snippets=[],
@@ -396,6 +417,99 @@ class QwenProvider(_OpenAICompatProvider):
             "- Direct quote AND a summary of the claim\n"
             "- Source URL (must be openable)\n"
         )
+
+
+async def _qwen_stream_collect(
+    base_url: str, api_key: str, payload: dict,
+) -> dict:
+    """POST a streaming chat-completions call and rebuild the non-streaming
+    response shape so the regular parser can handle it. DashScope requires
+    streaming whenever enable_search + enable_thinking are both on."""
+    import json as _json
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    text_buf: list[str] = []
+    search_results: list[dict] = []
+    tool_calls_partial: dict[int, dict] = {}
+    finish_reason: str | None = None
+    usage_final: dict = {}
+    response_id = ""
+    response_model = ""
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        async with client.stream(
+            "POST", f"{base_url}/chat/completions", json=payload, headers=headers,
+        ) as r:
+            if r.status_code >= 400:
+                body = (await r.aread()).decode("utf-8", "replace")
+                # Mimic httpx's HTTPStatusError so the caller can branch on it.
+                raise httpx.HTTPStatusError(
+                    body, request=r.request, response=r,
+                )
+            async for line in r.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    chunk = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+
+                if not response_id:
+                    response_id = chunk.get("id", "") or ""
+                if not response_model:
+                    response_model = chunk.get("model", "") or ""
+
+                # Top-level usage in the final chunk (because include_usage=True)
+                if isinstance(chunk.get("usage"), dict):
+                    usage_final = chunk["usage"]
+
+                # DashScope sometimes attaches search_info at the top level
+                si = (chunk.get("search_info") or {}).get("search_results")
+                if isinstance(si, list):
+                    search_results.extend(s for s in si if isinstance(s, dict))
+
+                for ch in chunk.get("choices") or []:
+                    delta = ch.get("delta") or {}
+                    if isinstance(delta.get("content"), str):
+                        text_buf.append(delta["content"])
+                    # message-level search_results occasionally appears on delta
+                    for sr in delta.get("search_results") or []:
+                        if isinstance(sr, dict):
+                            search_results.append(sr)
+                    # accumulate tool_calls (function call args may stream)
+                    for tc in delta.get("tool_calls") or []:
+                        idx = tc.get("index", 0)
+                        slot = tool_calls_partial.setdefault(
+                            idx, {"function": {"name": "", "arguments": ""}},
+                        )
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["function"]["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            slot["function"]["arguments"] += fn["arguments"]
+                    if ch.get("finish_reason"):
+                        finish_reason = ch["finish_reason"]
+
+    # Rebuild a non-streaming-shaped envelope for the parser.
+    return {
+        "id": response_id,
+        "model": response_model,
+        "choices": [{
+            "index": 0,
+            "finish_reason": finish_reason,
+            "message": {
+                "role": "assistant",
+                "content": "".join(text_buf),
+                "search_results": search_results,
+                "tool_calls": list(tool_calls_partial.values()) or None,
+            },
+        }],
+        "usage": usage_final,
+    }
 
 
 def _parse_qwen_chat_payload(

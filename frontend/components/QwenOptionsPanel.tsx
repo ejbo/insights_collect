@@ -31,7 +31,7 @@ export const DEFAULT_QWEN_OPTIONS: QwenOptions = {
   model: null,
   enable_search: true,
   enable_thinking: true,
-  search_strategy: "agent",
+  search_strategy: "agent_max",
   max_output_tokens: 8192,
 };
 
@@ -130,7 +130,7 @@ export function QwenOptionsPanel({
           max={32768}
           step={512}
           value={value.max_output_tokens}
-          onChange={(n) => patch("max_output_tokens", n ?? 8192)}
+          onChange={(n) => { if (n !== null) patch("max_output_tokens", n); }}
         />
       </div>
 

@@ -24,9 +24,11 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 def _to_view(row: models.ProviderCredential) -> ProviderCredentialView:
+    """The key is held server-side; the API never echoes it back to the
+    browser. UI shows `has_key` + last-tested status only."""
     return ProviderCredentialView(
         provider=row.provider,
-        api_key=row.api_key or "",
+        api_key="",                        # never expose the plaintext
         has_key=bool(row.api_key),
         base_url=row.base_url,
         default_model=row.default_model,

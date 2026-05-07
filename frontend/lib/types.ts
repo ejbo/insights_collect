@@ -67,7 +67,7 @@ export type GraphMeta = {
 };
 
 export type ClaudeOptions = {
-  effort: "low" | "medium" | "high" | "xhigh" | "max";
+  effort: "low" | "medium" | "high";
   max_uses: number;
   max_fetches: number;
   task_budget_tokens: number | null;

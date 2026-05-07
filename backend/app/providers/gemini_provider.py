@@ -77,10 +77,10 @@ class GeminiOptions:
     # The SDK has no hard knob for this; we inject the limit into the prompt
     # so the model self-restricts. Defaults match the user's "fewer searches"
     # request — well below Gemini's typical 8–12 per call.
-    max_search_queries: int = 3
+    max_search_queries: int = 5
     # Soft cap on how many grounding chunks to keep when persisting SearchHits.
     # Useful when google_search returns a long tail of low-relevance citations.
-    max_grounding_chunks: int = 8
+    max_grounding_chunks: int = 12
 
     @classmethod
     def from_dict(cls, d: dict | None) -> GeminiOptions:
@@ -371,22 +371,45 @@ class GeminiProvider(SearchProvider):
 # grounding_metadata parser
 # ---------------------------------------------------------------------------
 def _is_url_like(s: str | None) -> bool:
-    """Gemini sometimes hands us the URL itself in the title slot — useless to
+    """Gemini often hands us the URL itself in the title slot — useless to
     surface to the user. Spot it so we can fall back to a better label."""
     if not s:
         return True
     s = s.strip()
-    return s.startswith(("http://", "https://", "www.")) or s.endswith((".com", ".org", ".net"))
+    if s.startswith(("http://", "https://", "www.")):
+        return True
+    # `vertexaisearch.cloud.google.com/grounding-api-redirect/...` pattern
+    if "/grounding-api-redirect/" in s or s.endswith((".com", ".org", ".net", ".cn")):
+        return True
+    # bare digit / short ref like "1", "ref_3"
+    return s.replace(".", "").replace(" ", "").isdigit() or len(s) <= 2
+
+
+def _first_sentence(text: str | None, limit: int = 120) -> str | None:
+    """Take the first sentence-ish chunk for use as a title. Prefers Chinese
+    full-stop, period, exclamation, newline; falls back to a hard char limit."""
+    if not text:
+        return None
+    t = text.strip()
+    if not t:
+        return None
+    # split on common sentence enders
+    for sep in ("。", "！", "？", "\n", ". ", "! ", "? "):
+        idx = t.find(sep)
+        if 0 < idx <= limit:
+            return t[:idx].strip()
+    return t[:limit].strip()
 
 
 def _resolve_title(raw_title: str | None, url: str | None, fallback_text: str | None) -> str | None:
     """Pick the best human-readable title: the model-supplied one if it isn't
-    just the URL; else the cited text (truncated); else the URL's domain."""
+    junk (URL, single digit, etc.); else the first sentence of the cited text;
+    else the URL's domain."""
     if raw_title and not _is_url_like(raw_title):
         return raw_title.strip()
-    if fallback_text and fallback_text.strip():
-        text = fallback_text.strip().splitlines()[0].strip()
-        return text[:140] if text else None
+    sent = _first_sentence(fallback_text)
+    if sent:
+        return sent
     return _domain(url)
 
 
@@ -475,17 +498,21 @@ def _parse_response(
     for meta in chunk_meta[:max_chunks]:
         if not meta:
             continue
-        first_cite = meta["cited_texts"][0] if meta["cited_texts"] else None
-        title = _resolve_title(meta.get("raw_title"), meta.get("url"), first_cite)
-        snippet_text = (
-            first_cite or title or meta.get("raw_title") or ""
+        cited_texts = meta["cited_texts"]
+        # Concatenate up to 3 cited segments into a single preview line so
+        # the UI sees something more substantive than just the URL.
+        joined_cite = " · ".join(t.strip() for t in cited_texts[:3] if t and t.strip())
+        title = _resolve_title(
+            meta.get("raw_title"), meta.get("url"), joined_cite or (cited_texts[0] if cited_texts else None),
         )
+        snippet_text = joined_cite or (title or meta.get("raw_title") or "")
         search_results.append({
             "query": web_queries[0] if web_queries else query,
             "title": title,
             "url": meta.get("url"),
             "source_domain": meta.get("domain"),
             "page_age": None,
+            "snippet": snippet_text[:1000] or None,
             "kind": "web_search",
         })
         snippets.append(RawSnippet(

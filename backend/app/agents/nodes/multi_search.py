@@ -4,10 +4,13 @@ Behavior:
   - Each provider task runs to completion. The loop exits naturally when every
     task has either returned a result or raised. Persists each ProviderCall
     row the moment it lands so the UI shows live progress.
-  - No timeouts of any kind — slow providers (Anthropic adaptive thinking,
-    Gemini deep grounding) get to finish on their own. The user has a
-    「立即下一步」button that flips an in-process Event when a provider hangs;
-    we detach the still-pending tasks at that point and move on.
+  - One single hard wall-clock cap (`_MAX_NODE_DURATION_S`, 10 min). When it
+    elapses the node behaves exactly as if the user pressed 「立即下一步」:
+    pending provider tasks get detached and we move on with whatever already
+    landed. No per-task ceiling, no stagnation detector — providers that are
+    in the middle of legitimate slow work keep running until the global cap.
+  - The user's 「立即下一步」 button flips the same in-process advance Event
+    and short-circuits the wait at any time before the cap.
 """
 
 from __future__ import annotations
@@ -35,6 +38,9 @@ log = logging.getLogger(__name__)
 # finish on their own once their underlying IO unwinds. Without this set
 # they might be GC'd mid-flight.
 _DETACHED: set[asyncio.Task] = set()
+
+# Hard wall-clock cap on the whole multi_search node.
+_MAX_NODE_DURATION_S = 10 * 60
 
 
 _LANG_PROVIDER_BIAS = {
@@ -218,21 +224,41 @@ async def multi_search_node(state: ReportState) -> dict:
     errors: list[str] = []
     completed = 0
     advanced = False
+    auto_skip_reason: str | None = None
     cancelled_count = 0
 
     # Wait either for any task to finish OR for the user to press 「立即下一步」.
-    # The advance event is in-process; the API endpoint flips it. No timers
-    # of any kind — providers run to completion unless the user intervenes.
+    # The advance event is in-process; the API endpoint flips it.
     advance_event = get_advance_event(report_id) if report_id else asyncio.Event()
     advance_waiter: asyncio.Task | None = (
         asyncio.create_task(advance_event.wait()) if report_id else None
     )
+
+    # One single hard wall-clock cap: when this fires we set the same advance
+    # Event the user's button sets, so the existing detach-and-move-on path
+    # handles cleanup uniformly.
+    async def _global_deadline() -> None:
+        await asyncio.sleep(_MAX_NODE_DURATION_S)
+        if not advance_event.is_set():
+            log.warning(
+                "multi_search: hit %ds wall-clock cap — forcing skip",
+                _MAX_NODE_DURATION_S,
+            )
+            advance_event.set()
+
+    deadline_task = asyncio.create_task(_global_deadline())
+    deadline_started_at = time.monotonic()
 
     pending: set[asyncio.Task] = set(tasks)
     try:
         while pending:
             if advance_event.is_set():
                 advanced = True
+                if not auto_skip_reason and time.monotonic() - deadline_started_at >= _MAX_NODE_DURATION_S - 1:
+                    auto_skip_reason = (
+                        f"已到 {_MAX_NODE_DURATION_S // 60} 分钟上限，"
+                        f"自动进入下一步"
+                    )
                 break
 
             wait_set: set = set(pending)
@@ -295,6 +321,12 @@ async def multi_search_node(state: ReportState) -> dict:
                 p.add_done_callback(_DETACHED.discard)
             pending.clear()
     finally:
+        if not deadline_task.done():
+            deadline_task.cancel()
+            try:
+                await deadline_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if advance_waiter is not None and not advance_waiter.done():
             advance_waiter.cancel()
             try:
@@ -309,7 +341,10 @@ async def multi_search_node(state: ReportState) -> dict:
         f"({sum(1 for t in traces if not t.success)} failed)"
     )
     if advanced:
-        note += f" · 已按用户请求提前进入下一步（取消 {cancelled_count} 个未完成的调用）"
+        if auto_skip_reason:
+            note += f" · {auto_skip_reason}（取消 {cancelled_count} 个未完成的调用）"
+        else:
+            note += f" · 已按用户请求提前进入下一步（取消 {cancelled_count} 个未完成的调用）"
 
     return {
         "raw_snippets": snippets,

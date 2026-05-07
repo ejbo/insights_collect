@@ -18,6 +18,7 @@ Pricing for cost estimation (USD per 1M tokens):
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -78,8 +79,8 @@ class ClaudeOptions:
 
     Defaults are "中规中矩": balanced quality + cost.
     """
-    effort: str = "low"                        # low | medium | high | xhigh | max
-    max_uses: int = 1                          # max web_search invocations
+    effort: str = "medium"                     # low | medium | high (xhigh / max retired — burned tokens but rarely returned)
+    max_uses: int = 4                          # max web_search invocations
     max_fetches: int = 0                       # max web_fetch invocations (kept for back-compat — UI no longer exposes it)
     task_budget_tokens: int | None = None      # beta task-budgets; min 20_000
     thinking_display: str = "summarized"       # omitted | summarized
@@ -113,7 +114,10 @@ class ClaudeOptions:
             return cls()
 
 
-_VALID_EFFORT = {"low", "medium", "high", "xhigh", "max"}
+# xhigh / max removed — they reliably burned thinking tokens without
+# returning a usable answer. Old saved reports with those values get
+# silently downgraded to "high" via the fallback in search().
+_VALID_EFFORT = {"low", "medium", "high"}
 
 
 class AnthropicProvider(SearchProvider):
@@ -238,7 +242,7 @@ class AnthropicProvider(SearchProvider):
         lang: str = "zh",
         max_results: int = 10,
         options: dict | None = None,
-        **_: Any,
+        **kwargs: Any,
     ) -> SearchResult:
         client = self._ensure()
         opts = ClaudeOptions.from_dict(options)
@@ -247,6 +251,7 @@ class AnthropicProvider(SearchProvider):
         tools = self._build_tools(opts, time_window)
         output_config = self._build_output_config(opts)
         betas = self._betas_for(opts)
+        report_id = kwargs.get("report_id")
 
         msg_kwargs: dict[str, Any] = dict(
             model=model,
@@ -259,13 +264,69 @@ class AnthropicProvider(SearchProvider):
         )
 
         t0 = time.perf_counter()
+
+        async def _persist_partial(snapshot: Any, error_label: str) -> None:
+            """Best-effort save of any web_search results that already came
+            back before the stream died / was cancelled. Without this, when
+            multi_search detaches the task at the 10-min cap, every Claude
+            hit collected so far is thrown away even though the tokens were
+            already paid for."""
+            if not report_id or snapshot is None:
+                return
+            try:
+                _snip, sr, cit, _ts, _ft = _parse_response(snapshot, lang=lang, query=query)
+            except Exception:  # noqa: BLE001
+                return
+            if not sr:
+                return
+            usage = getattr(snapshot, "usage", None)
+            in_t = getattr(usage, "input_tokens", 0) if usage else 0
+            out_t = getattr(usage, "output_tokens", 0) if usage else 0
+            partial_trace = ProviderCallTrace(
+                provider=self.name, model=model, purpose="search", query=query,
+                success=False,
+                error=f"{error_label} mid-stream — saved {len(sr)} partial hit(s)",
+                tokens_input=in_t, tokens_output=out_t,
+                cost_usd=_cost(model, in_t, out_t),
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+                extra={
+                    "search_results": sr,
+                    "citations": cit,
+                    "partial": True,
+                    "model": model,
+                },
+            )
+            try:
+                from app.agents.nodes.multi_search import _persist_provider_call_and_hits
+                await _persist_provider_call_and_hits(report_id, partial_trace)
+            except Exception:  # noqa: BLE001
+                pass
+
         try:
             if betas:
                 async with client.beta.messages.stream(betas=betas, **msg_kwargs) as stream:
-                    resp = await stream.get_final_message()
+                    try:
+                        resp = await stream.get_final_message()
+                    except BaseException as e:
+                        # asyncio.shield so cancellation can't kill the DB write
+                        await asyncio.shield(_persist_partial(
+                            getattr(stream, "current_message_snapshot", None),
+                            type(e).__name__,
+                        ))
+                        raise
             else:
                 async with client.messages.stream(**msg_kwargs) as stream:
-                    resp = await stream.get_final_message()
+                    try:
+                        resp = await stream.get_final_message()
+                    except BaseException as e:
+                        await asyncio.shield(_persist_partial(
+                            getattr(stream, "current_message_snapshot", None),
+                            type(e).__name__,
+                        ))
+                        raise
+        except asyncio.CancelledError:
+            # Let the multi_search task-management layer handle teardown.
+            raise
         except Exception as e:  # noqa: BLE001
             return SearchResult(
                 snippets=[],
@@ -470,6 +531,14 @@ def _parse_response(
                 title = getattr(item, "title", None)
                 url = getattr(item, "url", None)
                 page_age = getattr(item, "page_age", None)
+                # Anthropic's search_result item may carry a `snippet` (newer
+                # SDK) or `description`. Pull whichever exists so the UI gets
+                # a real preview line, not just the title.
+                preview = (
+                    getattr(item, "snippet", None)
+                    or getattr(item, "description", None)
+                    or getattr(item, "text", None)
+                )
                 domain = _domain(url)
                 search_results.append({
                     "query": last_query,
@@ -477,11 +546,12 @@ def _parse_response(
                     "url": url,
                     "source_domain": domain,
                     "page_age": page_age,
+                    "snippet": preview,
                     "kind": "web_search",
                 })
                 snippets.append(RawSnippet(
                     title=title,
-                    snippet=(title or ""),
+                    snippet=(preview or title or "")[:1500] or "(web_search)",
                     url=url,
                     source_domain=domain,
                     provider="anthropic",
@@ -528,6 +598,21 @@ def _parse_response(
                     "url": getattr(c, "url", None),
                     "title": getattr(c, "title", None),
                 })
+
+    # Enrich SearchHits with cited_text from text-block citations: when Claude
+    # actually quotes from a search result, that's the most relevant preview
+    # for the UI. Only fill in when the search_result's snippet was empty.
+    cite_by_url: dict[str, str] = {}
+    for c in citations:
+        url = c.get("url")
+        ct = c.get("cited_text")
+        if url and ct and url not in cite_by_url:
+            cite_by_url[url] = ct
+    for sr in search_results:
+        if not sr.get("snippet"):
+            ct = cite_by_url.get(sr.get("url") or "")
+            if ct:
+                sr["snippet"] = ct[:1000]
 
     # Always at least one snippet — use the final text if no search results
     if not snippets and text_chunks:

@@ -64,6 +64,47 @@ _PRICE = {
 _HANDLE_RE = re.compile(r"(?:^|[^A-Za-z0-9_])@([A-Za-z0-9_]{2,15})\b")
 _X_URL_RE = re.compile(r"https?://(?:www\.)?(?:x\.com|twitter\.com)/([^/?#]+)/", re.IGNORECASE)
 _X_VIDEO_URL_RE = re.compile(r"x\.com/.+?/(video|i/status/\d+/video)", re.IGNORECASE)
+_JUNK_TITLE_RE = re.compile(r"^(?:ref[_ ]?\d+|\d{1,3}|\[\d+\])$", re.IGNORECASE)
+
+
+def _is_junk_title(t: str | None) -> bool:
+    """Detect titles like '1', '2', '[3]', 'ref_4' that grok emits as
+    citation labels — these are useless for display."""
+    if not t:
+        return True
+    s = t.strip()
+    if not s or len(s) <= 2:
+        return True
+    return bool(_JUNK_TITLE_RE.match(s))
+
+
+def _first_sentence(text: str | None, limit: int = 120) -> str | None:
+    if not text:
+        return None
+    t = text.strip()
+    if not t:
+        return None
+    for sep in ("。", "！", "？", "\n", ". ", "! ", "? "):
+        idx = t.find(sep)
+        if 0 < idx <= limit:
+            return t[:idx].strip()
+    return t[:limit].strip()
+
+
+def _pretty_title(raw_title: str | None, snippet: str | None, url: str | None) -> str | None:
+    """Pick a display-worthy title. Falls back to first sentence of snippet,
+    then the X handle in the URL, then the bare domain."""
+    if not _is_junk_title(raw_title):
+        return raw_title.strip() if raw_title else None
+    sent = _first_sentence(snippet)
+    if sent:
+        return sent
+    if url:
+        m = _X_URL_RE.search(url)
+        if m:
+            return f"@{m.group(1)}"
+        return _domain(url)
+    return None
 
 
 def _cost(m: str, i: int, o: int) -> float:
@@ -527,11 +568,13 @@ def _parse_responses_payload(
             if isinstance(si, int) and isinstance(ei, int) and 0 <= si < ei <= len(final_text)
             else ann.get("snippet")
         )
-        citations_norm.append({"url": url, "title": ann.get("title"), "cited_text": excerpt})
+        # Replace junk numeric titles ("1", "ref_3") with the cited excerpt.
+        title = _pretty_title(ann.get("title"), excerpt, url)
+        citations_norm.append({"url": url, "title": title, "cited_text": excerpt})
         hits.append({
             "kind": "x_post",
             "url": url,
-            "title": ann.get("title"),
+            "title": title,
             "snippet": (excerpt or "")[:1000] or None,
             "source_domain": _domain(url),
             "media_type": _media_type_for(url),
@@ -539,16 +582,17 @@ def _parse_responses_payload(
 
     for c in raw_citations:
         if isinstance(c, str):
-            url, title, snippet = c, None, None
+            url, raw_t, snippet = c, None, None
         elif isinstance(c, dict):
             url = c.get("url") or c.get("uri")
-            title = c.get("title")
+            raw_t = c.get("title")
             snippet = c.get("snippet") or c.get("excerpt") or c.get("cited_text")
         else:
             continue
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
+        title = _pretty_title(raw_t, snippet, url)
         citations_norm.append({"url": url, "title": title, "cited_text": snippet})
         hits.append({
             "kind": "x_post",

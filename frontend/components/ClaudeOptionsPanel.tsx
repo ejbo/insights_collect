@@ -9,10 +9,12 @@ import { NumberField } from "./NumberField";
 //   input  ≈ 2k system + 1k query + 4k * (max_uses + max_fetches)  (Claude includes
 //           web_search results as input tokens on subsequent rounds)
 //   output ≈ 2k base + 1.5k * effort_mult * (max_uses + max_fetches)
-// effort_mult: low 0.3, medium 0.6, high 1.0, xhigh 1.5, max 2.0
+// effort_mult: low 0.3, medium 0.6, high 1.0
+// (xhigh / max retired — they consumed tokens but routinely returned no
+// usable result; capped at "high" to avoid silent burn.)
 //
 const EFFORT_MULT: Record<ClaudeOptions["effort"], number> = {
-  low: 0.3, medium: 0.6, high: 1.0, xhigh: 1.5, max: 2.0,
+  low: 0.3, medium: 0.6, high: 1.0,
 };
 
 export function estimateClaudeCostPerTopic(o: ClaudeOptions): { low: number; high: number } {
@@ -26,8 +28,8 @@ export function estimateClaudeCostPerTopic(o: ClaudeOptions): { low: number; hig
 }
 
 export const DEFAULT_CLAUDE_OPTIONS: ClaudeOptions = {
-  effort: "low",
-  max_uses: 1,
+  effort: "medium",
+  max_uses: 4,
   max_fetches: 0,
   task_budget_tokens: null,
   thinking_display: "summarized",
@@ -89,14 +91,12 @@ export function ClaudeOptionsPanel({
           Effort · 思考深度与 token 花费
         </label>
         <div className="flex flex-wrap gap-xs">
-          {(["low", "medium", "high", "xhigh", "max"] as const).map((e) => {
+          {(["low", "medium", "high"] as const).map((e) => {
             const active = value.effort === e;
             const help: Record<typeof e, string> = {
               low: "最省钱",
               medium: "平衡",
               high: "推荐",
-              xhigh: "agentic 最佳",
-              max: "极限智能",
             } as any;
             return (
               <button
@@ -135,7 +135,7 @@ export function ClaudeOptionsPanel({
               min={1}
               max={10}
               value={value.max_uses}
-              onChange={(n) => patch("max_uses", n ?? 1)}
+              onChange={(n) => { if (n !== null) patch("max_uses", n); }}
             />
           </div>
         )}

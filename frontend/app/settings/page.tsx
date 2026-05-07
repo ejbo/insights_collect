@@ -72,19 +72,24 @@ type Edit = {
   api_key: string;
   default_model: string;
   base_url: string;
+  // Backend never echoes the actual key value, so we can't infer "did the
+  // user change it" from string equality alone. This flag flips true the
+  // moment the user types into / clears the api_key field.
+  api_key_dirty: boolean;
 };
 
 function emptyEdit(c: ProviderCredentialView): Edit {
   return {
-    api_key: c.api_key || "",
+    api_key: "",
     default_model: c.default_model || PROVIDER_INFO[c.provider]?.modelHint || "",
     base_url: c.base_url || "",
+    api_key_dirty: false,
   };
 }
 
-function diff(c: ProviderCredentialView, e: Edit): Partial<Edit> | null {
-  const out: Partial<Edit> = {};
-  if (e.api_key !== (c.api_key || "")) out.api_key = e.api_key;
+function diff(c: ProviderCredentialView, e: Edit): Partial<Omit<Edit, "api_key_dirty">> | null {
+  const out: Partial<Omit<Edit, "api_key_dirty">> = {};
+  if (e.api_key_dirty) out.api_key = e.api_key;
   if (e.default_model !== (c.default_model || "")) out.default_model = e.default_model;
   if (e.base_url !== (c.base_url || "")) out.base_url = e.base_url;
   return Object.keys(out).length === 0 ? null : out;
@@ -138,6 +143,10 @@ export default function SettingsPage() {
         method: "PUT",
         body: JSON.stringify(payload),
       });
+      // Clear local edits so the hydration useEffect re-fills from the freshly
+      // fetched (still redacted) server view; this drops api_key_dirty and the
+      // "已配置 ✓" placeholder reappears.
+      setEdits({});
       await mutate();
       setBannerMsg(`Saved ${dirtyCount} provider${dirtyCount > 1 ? "s" : ""}.`);
       setTimeout(() => setBannerMsg(null), 3000);
@@ -235,6 +244,9 @@ function ProviderCard({
   const [smokeBusy, setSmokeBusy] = useState(false);
   const [smokeResult, setSmokeResult] = useState<any | null>(null);
 
+  // API key visibility — hidden by default for shoulder-surfing protection.
+  const [revealKey, setRevealKey] = useState(false);
+
   async function test() {
     setBusy(true);
     setTestMsg("Testing…");
@@ -271,7 +283,11 @@ function ProviderCard({
     }
   }
 
-  const enabled = !!edit.api_key;
+  // "Has a usable key" = either user just typed one OR the server says one
+  // is already saved. Don't gate on `edit.api_key` alone, because the server
+  // never echoes the saved key back — without the cred.has_key fallback the
+  // 测试/试搜索 buttons would be disabled forever after a page refresh.
+  const enabled = !!edit.api_key || cred.has_key;
   const statusBadge =
     cred.test_status === "ok"
       ? "status-succeeded"
@@ -304,7 +320,7 @@ function ProviderCard({
         <div className="flex items-center gap-xs">
           <button
             onClick={test}
-            disabled={busy || !edit.api_key}
+            disabled={busy || !enabled}
             className="btn-pearl"
             title="GET /v1/models — 快速验证 key"
           >
@@ -312,7 +328,7 @@ function ProviderCard({
           </button>
           <button
             onClick={() => setSmokeOpen((v) => !v)}
-            disabled={!edit.api_key}
+            disabled={!enabled}
             className="btn-pearl"
             title="跑一次真实 search，验证整条链路"
           >
@@ -324,16 +340,60 @@ function ProviderCard({
       {/* Inputs */}
       <div className="mt-md grid grid-cols-1 gap-sm md:grid-cols-2">
         <label className="block md:col-span-2">
-          <span className="mb-xxs block text-caption-strong text-ink">API key</span>
-          <input
-            type="text"
-            spellCheck={false}
-            autoComplete="off"
-            className="input-flat font-mono"
-            placeholder="sk-... 直接粘贴明文"
-            value={edit.api_key}
-            onChange={(ev) => onChange({ api_key: ev.target.value })}
-          />
+          <span className="mb-xxs flex items-baseline justify-between text-caption-strong text-ink">
+            <span>API key</span>
+            <span className="flex items-center gap-md text-caption text-ink-muted-48">
+              {(edit.api_key || cred.has_key) && (
+                <button
+                  type="button"
+                  onClick={() => setRevealKey((v) => !v)}
+                  className="hover:text-primary"
+                  title={
+                    !edit.api_key && cred.has_key
+                      ? "服务器不会回传 key 明文。点开会清空当前值，让你输入新 key。"
+                      : revealKey ? "隐藏明文" : "临时显示明文（仅本次浏览器会话）"
+                  }
+                >
+                  {!edit.api_key && cred.has_key
+                    ? "替换 key"
+                    : revealKey ? "隐藏" : "显示"}
+                </button>
+              )}
+              {(edit.api_key_dirty ? edit.api_key : cred.has_key) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (confirm("清空当前 API key？保存后该 provider 会被禁用。")) {
+                      onChange({ api_key: "", api_key_dirty: true });
+                      setRevealKey(false);
+                    }
+                  }}
+                  className="hover:text-status-danger"
+                >
+                  清除
+                </button>
+              )}
+            </span>
+          </span>
+          {!edit.api_key_dirty && cred.has_key && !revealKey ? (
+            // Server has a key, user hasn't started editing → show only a
+            // sentinel. Click "替换 key" to start typing a new one.
+            <div className="input-flat font-mono flex items-center text-ink-muted-48">
+              <span>•••••••••••••••••••••••••</span>
+              <span className="ml-auto text-caption">已配置 ✓</span>
+            </div>
+          ) : (
+            <input
+              type={revealKey ? "text" : "password"}
+              spellCheck={false}
+              autoComplete="off"
+              className="input-flat font-mono"
+              placeholder={cred.has_key ? "粘贴新 key 替换原值（留空则不变）" : "sk-... 直接粘贴明文"}
+              value={edit.api_key}
+              onChange={(ev) => onChange({ api_key: ev.target.value, api_key_dirty: true })}
+              autoFocus={revealKey && cred.has_key && !edit.api_key}
+            />
+          )}
         </label>
 
         <label className="block md:col-span-2">

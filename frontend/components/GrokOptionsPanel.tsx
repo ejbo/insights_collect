@@ -116,7 +116,7 @@ export function GrokOptionsPanel({
           min={1}
           max={10}
           value={value.max_candidate_handles}
-          onChange={(n) => patch("max_candidate_handles", Math.max(1, Math.min(10, n ?? 8)))}
+          onChange={(n) => { if (n !== null) patch("max_candidate_handles", Math.max(1, Math.min(10, n))); }}
         />
         <p className="mt-xxs text-caption text-ink-muted-48">
           第 1 轮挖出的关键人物数量；越多越贵但覆盖越广。
